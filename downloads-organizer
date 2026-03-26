@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""
+Downloads Organizer
+-------------------
+Reads a list of client names from ~/Downloads/clients.csv,
+scans all files in ~/Downloads (including subfolders),
+matches filenames to clients, previews the plan, then moves files
+into ~/Downloads/Organized/<ClientName>/ upon confirmation.
+
+Unmatched files go to ~/Downloads/Organized/Other/
+"""
+
+import os
+import csv
+import shutil
+from pathlib import Path
+from collections import defaultdict
+
+
+DOWNLOADS = Path.home() / "Downloads"
+CSV_PATH = DOWNLOADS / "clients.csv"
+ORGANIZED = DOWNLOADS / "Organized"
+SCRIPT_NAME = Path(__file__).name
+
+
+def load_clients():
+    """
+    Returns a list of (canonical_name, [variation1, variation2, ...]) tuples.
+    Column A is the canonical name (used as the folder name).
+    Any additional columns in the same row are treated as name variations.
+    All variations — including the canonical name itself — are matched against filenames.
+    """
+    if not CSV_PATH.exists():
+        print(f"\n  Could not find clients.csv in {DOWNLOADS}")
+        print("  Please save your client list as 'clients.csv' in your Downloads folder.")
+        print("  Column A = folder name, additional columns = name variations.\n")
+        return []
+
+    clients = []
+    with open(CSV_PATH, "r", encoding="utf-8-sig") as f:
+        for row in csv.reader(f):
+            names = [cell.strip() for cell in row if cell.strip()]
+            if names:
+                canonical = names[0]
+                variations = names  # includes canonical itself
+                clients.append((canonical, variations))
+
+    return clients
+
+
+def find_match(filename, clients):
+    """Check filename against every variation; return the canonical name if matched."""
+    lower = filename.lower()
+    for canonical, variations in clients:
+        if any(v.lower() in lower for v in variations):
+            return canonical
+    return None
+
+
+def collect_files():
+    files = []
+    for root, dirs, filenames in os.walk(DOWNLOADS):
+        root_path = Path(root)
+
+        # Don't descend into the Organized output folder
+        dirs[:] = [d for d in dirs if root_path / d != ORGANIZED]
+
+        for name in filenames:
+            filepath = root_path / name
+
+            # Skip hidden files, the script itself, and the CSV
+            if name.startswith("."):
+                continue
+            if filepath == CSV_PATH:
+                continue
+            if name == SCRIPT_NAME:
+                continue
+
+            files.append(filepath)
+
+    return files
+
+
+def safe_destination(folder, filename):
+    """Return a destination path that doesn't already exist (appends _1, _2 … if needed)."""
+    dest = folder / filename
+    if not dest.exists():
+        return dest
+
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    counter = 1
+    while dest.exists():
+        dest = folder / f"{stem}_{counter}{suffix}"
+        counter += 1
+    return dest
+
+
+def main():
+    print("\n=== Downloads Organizer ===\n")
+
+    # Load clients
+    clients = load_clients()
+    if not clients:
+        return
+    total_variations = sum(len(v) - 1 for _, v in clients)
+    print(f"  Loaded {len(clients)} clients ({total_variations} name variation(s)) from clients.csv")
+
+    # Collect all files
+    all_files = collect_files()
+    if not all_files:
+        print("  No files found in Downloads.\n")
+        return
+    print(f"  Found {len(all_files)} files to evaluate\n")
+
+    # Build the move plan
+    plan = defaultdict(list)
+    for filepath in all_files:
+        match = find_match(filepath.name, clients)
+        plan[match if match else "Other"].append(filepath)
+
+    # ── Preview ──────────────────────────────────────────────────────────────
+    matched_count = sum(len(v) for k, v in plan.items() if k != "Other")
+    other_count = len(plan.get("Other", []))
+
+    print("FILES TO BE ORGANIZED:")
+    print("─" * 56)
+
+    # Client folders (alphabetical)
+    for folder in sorted(k for k in plan if k != "Other"):
+        print(f"\n  {folder}/")
+        for f in sorted(plan[folder], key=lambda x: x.name):
+            print(f"      → {f.name}")
+
+    # Other folder
+    if plan["Other"]:
+        print(f"\n  Other/  (no client match found)")
+        for f in sorted(plan["Other"], key=lambda x: x.name):
+            print(f"      → {f.name}")
+
+    print("\n" + "─" * 56)
+    print(f"  {matched_count} file(s) matched to clients")
+    print(f"  {other_count} file(s) → Other")
+    print(f"  Destination: {ORGANIZED}/")
+    print("─" * 56)
+
+    # ── Confirm ───────────────────────────────────────────────────────────────
+    answer = input("\nType YES to move files, or NO to cancel: ").strip()
+    if answer != "YES":
+        print("\n  Cancelled. No files were moved.\n")
+        return
+
+    # ── Execute ───────────────────────────────────────────────────────────────
+    moved, errors = 0, 0
+
+    for folder_name, files in plan.items():
+        dest_folder = ORGANIZED / folder_name
+        dest_folder.mkdir(parents=True, exist_ok=True)
+
+        for filepath in files:
+            dest = safe_destination(dest_folder, filepath.name)
+            try:
+                shutil.move(str(filepath), str(dest))
+                moved += 1
+            except Exception as e:
+                print(f"  Could not move {filepath.name}: {e}")
+                errors += 1
+
+    print(f"\n  Done! {moved} file(s) moved to {ORGANIZED}/")
+    if errors:
+        print(f"  {errors} file(s) could not be moved (see messages above)")
+    print()
+
+
+if __name__ == "__main__":
+    main()
